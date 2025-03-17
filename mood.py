@@ -28,16 +28,17 @@ CONFIDENCE_THRESHOLD = 30  # Threshold untuk testing
 
 # Konfigurasi Ollama Llava untuk deteksi mood
 OLLAMA_ENABLED = True  # Set ke False jika tidak ingin menggunakan Llava
-OLLAMA_URL = "http://10.53.25.239:11434/api/chat"  # URL API Ollama
+# OLLAMA_URL = "http://localhost:11434/api/generate"  # URL API Ollama
+OLLAMA_URL = "http://10.53.25.239:11434/api"  # URL API Ollama
 OLLAMA_MODEL = "llava:latest"  # Nama default, akan otomatis mencari model llava yang tersedia
 
 # Konfigurasi Database PostgreSQL
 DB_CONFIG = {
-    "host": "localhost",
-    "database": "localhost-chr",  # Ganti dengan nama database Anda
+    "host": "103.149.230.107",
+    "database": "demo_staging_bi",  # Ganti dengan nama database Anda
     "user": "postgres",  # Ganti dengan username Anda
-    "password": "postgres",  # Ganti dengan password Anda
-    "port": "5432"  # Ganti jika port berbeda
+    "password": "P@ssw0rd",  # Ganti dengan password Anda
+    "port": "6623"  # Ganti jika port berbeda
 }
 DB_TABLE = "data_absensi"  # Nama tabel untuk menyimpan data absensi
 
@@ -47,6 +48,7 @@ KELAS_MAP = {
     "CHRISTINE S": "CHR",
     "DENIS": "DEN",
     "FADLY": "FDL",
+    "M FADLY": "FDL 2",
     "FAISAL": "FAI"
     # Tambahkan mapping lain sesuai kebutuhan
     # Jika tidak ada di mapping, akan menggunakan "Kelas Default"
@@ -163,7 +165,7 @@ def create_table(conn):
 # Tambahkan fungsi ini ke kode Anda untuk menampilkan model yang tersedia
 def list_available_ollama_models():
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        response = requests.get(OLLAMA_URL+"/tags", timeout=5)
         if response.status_code == 200:
             data = response.json()
             models = data.get('models', [])
@@ -185,7 +187,7 @@ def check_ollama_connection():
 
     try:
         # Cek koneksi ke Ollama dengan simple health check
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        response = requests.get(OLLAMA_URL+"/tags", timeout=5)
         if response.status_code == 200:
             print("Terhubung ke server Ollama.")
 
@@ -223,6 +225,7 @@ def check_ollama_connection():
 def analyze_mood(face_image):
     global mood_cache, OLLAMA_MODEL
 
+    # Jika Ollama dimatikan, return mood default
     if not OLLAMA_ENABLED:
         return {"category": "Normal", "analysis": "Fitur analisis mood tidak aktif"}
 
@@ -250,8 +253,16 @@ def analyze_mood(face_image):
             "images": [img_base64]
         }
 
-        # Kirim request ke Ollama
-        response = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        # Debug: Log payload size
+        print(f"Image payload size: {len(img_base64)} bytes")
+
+        # Kirim request ke Ollama dengan timeout lebih lama
+        print(f"Sending request to Ollama using model {payload['model']}...")
+        response = requests.post(OLLAMA_URL+"/chat", json=payload, timeout=30)
+
+        # Debug: Log full response
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text[:200]}...")  # Print first 200 chars
 
         if response.status_code == 200:
             result = response.json()
@@ -492,7 +503,7 @@ def check_ollama_connection():
 
     try:
         # Cek koneksi ke Ollama dengan simple health check
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        response = requests.get(OLLAMA_URL+"/tags", timeout=2)
         if response.status_code == 200:
             models = response.json().get('models', [])
             # Periksa apakah model llava tersedia
@@ -538,7 +549,7 @@ def main():
 
     # Mulai video capture
     print("Opening webcam...")
-    video_capture = cv2.VideoCapture(0)
+    video_capture = cv2.VideoCapture(1)
 
     if not video_capture.isOpened():
         print("Error: Could not open webcam!")
