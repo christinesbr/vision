@@ -24,7 +24,6 @@ except ImportError:
 
 # Konfigurasi
 MODEL_PATH = "Model"  # Path folder foto model
-# OUTPUT_FILE = "6.csv"  # File CSV untuk output
 CONFIDENCE_THRESHOLD = 30  # Threshold untuk testing
 
 # Konfigurasi Ollama Llava untuk deteksi mood
@@ -232,44 +231,43 @@ def analyze_mood(face_image):
         _, buffer = cv2.imencode('.jpg', face_image)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
 
-        # Buat payload untuk API Ollama
+        # Buat payload dengan prompt yang lebih sederhana untuk testing
         payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": "Analyze this person's facial expression and determine their mood. Only respond with a single word: either 'Stress' or 'Good'. Don't explain your reasoning or provide any other text.",
+            "model": "llava:latest",  # Gunakan nama model lengkap dengan tag
+            "prompt": "Describe this person's mood in one word: Happy, Sad, Neutral, or Stressed?",
             "stream": False,
             "images": [img_base64]
         }
 
-        # Kirim request ke Ollama
-        print(f"Sending request to Ollama for mood analysis using model {OLLAMA_MODEL}...")
-        response = requests.post(OLLAMA_URL, json=payload, timeout=15)  # Increased timeout
+        # Debug: Log payload size
+        print(f"Image payload size: {len(img_base64)} bytes")
+
+        # Kirim request ke Ollama dengan timeout lebih lama
+        print(f"Sending request to Ollama using model {payload['model']}...")
+        response = requests.post(OLLAMA_URL, json=payload, timeout=30)
+
+        # Debug: Log full response
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text[:200]}...")  # Print first 200 chars
 
         if response.status_code == 200:
             result = response.json()
-
-            # Extract mood dari response
             mood_text = result.get('response', '').strip()
-            print(f"Raw response from Ollama: '{mood_text}'")
 
-            # Normalize mood (Stress or Good)
-            if 'stress' in mood_text.lower():
-                mood = "Stress"
-            elif 'good' in mood_text.lower() or 'happy' in mood_text.lower() or 'positive' in mood_text.lower():
-                mood = "Good"
+            # Normalisasi mood
+            mood_text = mood_text.lower()
+            if 'happy' in mood_text or 'good' in mood_text:
+                return "Good"
+            elif 'sad' in mood_text or 'stress' in mood_text or 'angry' in mood_text:
+                return "Stress"
             else:
-                mood = "Normal"  # Default jika tidak terdeteksi dengan jelas
-
-            print(f"Detected mood: {mood}")
-            return mood
+                return "Normal"
         else:
-            print(f"Error from Ollama API: {response.status_code}")
-            if response.text:
-                print(f"Error details: {response.text}")
-            return "Normal"  # Default jika error
+            return f"Error: {response.status_code}"
     except Exception as e:
-        print(f"Error analyzing mood: {e}")
+        print(f"Exception in mood analysis: {str(e)}")
         traceback.print_exc()
-        return "Normal"  # Default jika error
+        return f"Error: {str(e)[:50]}"
 
 
 # Fungsi untuk preprocessing gambar
@@ -360,55 +358,6 @@ def train_face_recognizer():
         print("Error: No faces found for training.")
         return {}
 
-
-# # Siapkan file CSV
-# def setup_csv():
-#     try:
-#         # Cek apakah file sudah ada
-#         file_exists = os.path.isfile(OUTPUT_FILE)
-#
-#         # Buat file CSV jika belum ada
-#         if not file_exists:
-#             with open(OUTPUT_FILE, 'w', newline='') as csvfile:
-#                 fieldnames = ['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood']
-#                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-#                 writer.writeheader()
-#         # Jika file sudah ada, cek header untuk kompatibilitas
-#         else:
-#             with open(OUTPUT_FILE, 'r', newline='') as csvfile:
-#                 reader = csv.reader(csvfile)
-#                 header = next(reader, None)
-#
-#                 # Jika header lama tidak memiliki kolom Mood, buat file baru
-#                 if header and 'Mood' not in header:
-#                     print("Updating CSV format to include Mood column...")
-#                     # Backup file lama
-#                     backup_file = f"{OUTPUT_FILE}.bak"
-#                     os.rename(OUTPUT_FILE, backup_file)
-#
-#                     # Buat file baru dengan header yang benar
-#                     with open(OUTPUT_FILE, 'w', newline='') as new_csvfile:
-#                         fieldnames = ['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood']
-#                         writer = csv.DictWriter(new_csvfile, fieldnames=fieldnames)
-#                         writer.writeheader()
-#
-#                         # Copy data lama ke file baru
-#                         with open(backup_file, 'r', newline='') as old_csvfile:
-#                             reader = csv.DictReader(old_csvfile)
-#                             for row in reader:
-#                                 # Tambahkan kolom Mood jika tidak ada
-#                                 if 'Mood' not in row:
-#                                     row['Mood'] = 'Normal'
-#                                 writer.writerow(row)
-#
-#                     print(f"CSV file updated. Backup saved as {backup_file}")
-#
-#         return True
-#     except Exception as e:
-#         print(f"Error setting up CSV: {e}")
-#         return False
-
-
 # Fungsi untuk mencatat absensi ke database
 def record_attendance_to_db(conn, name, confidence, mood):
     if not conn or not use_database:
@@ -456,20 +405,6 @@ def record_attendance_to_csv(name, confidence, mood):
 
         # Dapatkan kelas dari mapping berdasarkan ID/nama
         kelas = get_class_for_student(name)
-
-        # Tambahkan data ke CSV
-        # with open(OUTPUT_FILE, 'a', newline='') as csvfile:
-        #     writer = csv.DictWriter(csvfile,
-        #                             fieldnames=['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood'])
-        #     writer.writerow({
-        #         'Nama': name,
-        #         'Kelas': kelas,
-        #         'Tanggal': date_string,
-        #         'Waktu': time_string,
-        #         'Status': 'Hadir',
-        #         'Confidence': f"{confidence:.2f}",
-        #         'Mood': mood
-        #     })
 
         print(f"Recorded attendance to CSV for {name} ({kelas}) at {time_string} - Mood: {mood}")
         return True
@@ -554,13 +489,6 @@ def main():
         if db_conn:
             db_conn.close()
         return
-
-    # Setup CSV
-    # if not setup_csv():
-    #     print("Error: CSV setup failed. Exiting.")
-    #     if db_conn:
-    #         db_conn.close()
-    #     return
 
     # Mulai video capture
     print("Opening webcam...")
