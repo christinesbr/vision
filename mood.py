@@ -28,8 +28,8 @@ CONFIDENCE_THRESHOLD = 30  # Threshold untuk testing
 
 # Konfigurasi Ollama Llava untuk deteksi mood
 OLLAMA_ENABLED = True  # Set ke False jika tidak ingin menggunakan Llava
-OLLAMA_URL = "http://localhost:11434/api/generate"  # URL API Ollama
-OLLAMA_MODEL = "llava"  # Nama default, akan otomatis mencari model llava yang tersedia
+OLLAMA_URL = "http://10.53.25.239:11434/api/chat"  # URL API Ollama
+OLLAMA_MODEL = "llava:latest"  # Nama default, akan otomatis mencari model llava yang tersedia
 
 # Konfigurasi Database PostgreSQL
 DB_CONFIG = {
@@ -113,7 +113,7 @@ def create_table(conn):
         table_exists = cursor.fetchone()[0]
 
         if not table_exists:
-            # Buat tabel baru dengan kolom mood
+            # Buat tabel baru dengan kolom mood dan mood_analysis
             create_table_query = f"""
             CREATE TABLE {DB_TABLE} (
                 id SERIAL PRIMARY KEY,
@@ -123,33 +123,34 @@ def create_table(conn):
                 waktu TIME NOT NULL,
                 status TEXT,
                 confidence NUMERIC(5, 2),
-                mood TEXT
+                mood TEXT,
+                mood_analysis TEXT
             )
             """
             cursor.execute(create_table_query)
             conn.commit()
             print(f"Table {DB_TABLE} created successfully")
         else:
-            # Cek apakah kolom mood sudah ada
+            # Cek apakah kolom mood_analysis sudah ada
             try:
                 check_column_query = f"""
                 SELECT column_name FROM information_schema.columns 
-                WHERE table_name = '{DB_TABLE}' AND column_name = 'mood'
+                WHERE table_name = '{DB_TABLE}' AND column_name = 'mood_analysis'
                 """
                 cursor.execute(check_column_query)
-                mood_column_exists = cursor.fetchone()
+                analysis_column_exists = cursor.fetchone()
 
-                # Jika kolom mood belum ada, tambahkan
-                if not mood_column_exists:
+                # Jika kolom mood_analysis belum ada, tambahkan
+                if not analysis_column_exists:
                     add_column_query = f"""
                     ALTER TABLE {DB_TABLE} 
-                    ADD COLUMN mood TEXT
+                    ADD COLUMN mood_analysis TEXT
                     """
                     cursor.execute(add_column_query)
                     conn.commit()
-                    print(f"Added 'mood' column to {DB_TABLE}")
+                    print(f"Added 'mood_analysis' column to {DB_TABLE}")
             except Exception as e:
-                print(f"Error checking/adding mood column: {e}")
+                print(f"Error checking/adding mood_analysis column: {e}")
 
         cursor.close()
         return True
@@ -222,52 +223,97 @@ def check_ollama_connection():
 def analyze_mood(face_image):
     global mood_cache, OLLAMA_MODEL
 
-    # Jika Ollama dimatikan, return mood default
     if not OLLAMA_ENABLED:
-        return "Normal"
+        return {"category": "Normal", "analysis": "Fitur analisis mood tidak aktif"}
 
     try:
         # Konversi image ke base64
         _, buffer = cv2.imencode('.jpg', face_image)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
 
-        # Buat payload dengan prompt yang lebih sederhana untuk testing
+        # Buat prompt yang meminta kategori dan penjelasan
+        detailed_prompt = """
+        Analisis ekspresi wajah orang ini dan berikan:
+        1. Kategori mood (pilih satu: Stress, Good, atau Normal)
+        2. Penjelasan singkat (maks 50 kata) mengapa Anda memilih kategori tersebut berdasarkan fitur wajah yang terlihat.
+
+        Format jawaban:
+        KATEGORI: [kategori mood]
+        ANALISIS: [penjelasan singkat]
+        """
+
+        # Buat payload untuk API Ollama
         payload = {
-            "model": "llava:latest",  # Gunakan nama model lengkap dengan tag
-            "prompt": "Describe this person's mood in one word: Happy, Sad, Neutral, or Stressed?",
+            "model": "llava:latest",  # Pastikan menggunakan nama yang tepat
+            "prompt": detailed_prompt,
             "stream": False,
             "images": [img_base64]
         }
 
-        # Debug: Log payload size
-        print(f"Image payload size: {len(img_base64)} bytes")
-
-        # Kirim request ke Ollama dengan timeout lebih lama
-        print(f"Sending request to Ollama using model {payload['model']}...")
+        # Kirim request ke Ollama
         response = requests.post(OLLAMA_URL, json=payload, timeout=30)
-
-        # Debug: Log full response
-        print(f"Response status: {response.status_code}")
-        print(f"Response text: {response.text[:200]}...")  # Print first 200 chars
 
         if response.status_code == 200:
             result = response.json()
-            mood_text = result.get('response', '').strip()
+            response_text = result.get('response', '').strip()
 
-            # Normalisasi mood
-            mood_text = mood_text.lower()
-            if 'happy' in mood_text or 'good' in mood_text:
-                return "Good"
-            elif 'sad' in mood_text or 'stress' in mood_text or 'angry' in mood_text:
-                return "Stress"
+            # Parsing respons untuk ekstrak kategori dan analisis
+            category = "Normal"  # Default
+            analysis = ""
+
+            # Coba ekstrak kategori dan analisis dari respons
+            if "KATEGORI:" in response_text:
+                parts = response_text.split("KATEGORI:", 1)[1].split("ANALISIS:", 1)
+                if len(parts) > 0:
+                    category = parts[0].strip()
+                if len(parts) > 1:
+                    analysis = parts[1].strip()
             else:
-                return "Normal"
+                # Fallback jika format tidak sesuai
+                analysis = response_text[:200]  # Batasi panjang
+                # Tentukan kategori dari teks
+                if "stress" in response_text.lower() or "tegang" in response_text.lower():
+                    category = "Stress"
+                elif "bahagia" in response_text.lower() or "senang" in response_text.lower() or "positif" in response_text.lower():
+                    category = "Good"
+                else:
+                    category = "Normal"
+
+            # Return objek yang berisi kategori dan analisis
+            return {"category": category, "analysis": analysis}
         else:
-            return f"Error: {response.status_code}"
+            return {"category": "Error", "analysis": f"HTTP Error: {response.status_code}"}
     except Exception as e:
-        print(f"Exception in mood analysis: {str(e)}")
+        print(f"Error analyzing mood: {e}")
         traceback.print_exc()
-        return f"Error: {str(e)[:50]}"
+        return {"category": "Error", "analysis": str(e)[:100]}
+
+
+def record_attendance(name, confidence, face_img=None):
+    # Analisis mood jika gambar wajah tersedia
+    mood_data = {"category": "Normal", "analysis": ""}  # Default mood
+
+    if face_img is not None and OLLAMA_ENABLED:
+        # Cek cache dulu
+        cache_key = f"{name}_{int(time.time() / 60)}"  # Cache per menit per orang
+        if cache_key in mood_cache:
+            mood_data = mood_cache[cache_key]
+        else:
+            # Analisis mood dengan Ollama
+            mood_data = analyze_mood(face_img)
+            # Simpan ke cache
+            mood_cache[cache_key] = mood_data
+
+    # Catat ke database jika tersedia
+    db_success = False
+    if db_conn and use_database:
+        db_success = record_attendance_to_db(db_conn, name, confidence, mood_data)
+
+    # Catat ke CSV (sebagai backup atau jika database tidak tersedia)
+    csv_success = record_attendance_to_csv(name, confidence, mood_data)
+
+    # Return True jika salah satu berhasil
+    return (db_success or csv_success), mood_data
 
 
 # Fungsi untuk preprocessing gambar
@@ -584,11 +630,24 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
                     # Tampilkan mood di bawah nama
-                    if name != "Unknown" and detected_mood != "Unknown":
-                        mood_color = (0, 255, 0) if detected_mood == "Good" else (
-                        0, 0, 255) if detected_mood == "Stress" else (255, 165, 0)
-                        cv2.putText(display_frame, f"Mood: {detected_mood}", (x, y + h + 20),
+                    if name != "Unknown" and detected_mood["category"] != "Unknown":
+                        mood_color = (0, 255, 0) if detected_mood["category"] == "Good" else (
+                            0, 0, 255) if detected_mood["category"] == "Stress" else (255, 165, 0)
+
+                        # Tampilkan kategori mood
+                        cv2.putText(display_frame, f"Mood: {detected_mood['category']}", (x, y + h + 20),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, mood_color, 2)
+
+                        # Tampilkan analisis mood (maksimal 60 karakter)
+                        analysis_text = detected_mood.get("analysis", "")
+                        if analysis_text:
+                            # Batasi panjang teks dan bagi menjadi beberapa baris jika perlu
+                            max_length = 60
+                            if len(analysis_text) > max_length:
+                                analysis_text = analysis_text[:max_length] + "..."
+
+                            cv2.putText(display_frame, f"Analisis: {analysis_text}", (x, y + h + 40),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
                 except Exception as e:
                     print(f"Error processing face: {e}")
