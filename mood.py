@@ -680,7 +680,6 @@ def main():
         mood = mood_record.get(name, "Normal")
         print(f"- {name} ({kelas}) - Mood: {mood}")
 
-
 if __name__ == "__main__":
     try:
         main()
