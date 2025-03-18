@@ -24,7 +24,7 @@ except ImportError:
 
 # Konfigurasi
 MODEL_PATH = "Model"  # Path folder foto model
-CONFIDENCE_THRESHOLD = 30  # Threshold untuk testing
+CONFIDENCE_THRESHOLD = 10  # Threshold untuk testing
 
 # Konfigurasi Ollama Llava untuk deteksi mood
 OLLAMA_ENABLED = True  # Set ke False jika tidak ingin menggunakan Llava
@@ -44,11 +44,10 @@ DB_TABLE = "data_absensi"  # Nama tabel untuk menyimpan data absensi
 
 # Konfigurasi Kelas - gunakan kelas yang tetap tanpa nama orang
 KELAS_MAP = {
-    "CHRISTINE": "HRK",
-    "CHRISTINE S": "CHR",
+    "CHRISTINE": "CHR",
     "DENIS": "DEN",
     "FADLY": "FDL",
-    "M FADLY": "FDL 2",
+    "MUMTAZ": "MTZ",
     "FAISAL": "FAI"
     # Tambahkan mapping lain sesuai kebutuhan
     # Jika tidak ada di mapping, akan menggunakan "Kelas Default"
@@ -356,56 +355,55 @@ def train_face_recognizer():
     label_map = {}
     label_count = 0
 
-    # Periksa semua file dalam folder Model
-    for image_file in os.listdir(MODEL_PATH):
-        if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-            print(f"Processing {image_file}")
-            image_path = os.path.join(MODEL_PATH, image_file)
+    # Mengambil gambar dari setiap subfolder (kelas) di dalam folder Model
+    for class_folder in os.listdir(MODEL_PATH):
+        class_path = os.path.join(MODEL_PATH, class_folder)
+        if os.path.isdir(class_path):  # Pastikan itu folder (kelas)
+            for image_file in os.listdir(class_path):
+                if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    print(f"Processing {image_file} from {class_folder}")
+                    image_path = os.path.join(class_path, image_file)
 
-            # Load gambar
-            img = cv2.imread(image_path)
-            if img is None:
-                print(f"Error loading {image_path}. File mungkin rusak.")
-                continue
+                    # Load gambar
+                    img = cv2.imread(image_path)
+                    if img is None:
+                        print(f"Error loading {image_path}. File mungkin rusak.")
+                        continue
 
-            # Preprocessing
-            gray = preprocess_face(img)
+                    # Preprocessing gambar
+                    gray = preprocess_face(img)
 
-            # Deteksi wajah
-            detected_faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                    # Deteksi wajah
+                    detected_faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-            if len(detected_faces) > 0:
-                # Ambil wajah terbesar
-                (x, y, w, h) = sorted(detected_faces, key=lambda x: x[2] * x[3], reverse=True)[0]
+                    if len(detected_faces) > 0:
+                        (x, y, w, h) = detected_faces[0]
 
-                # Ekstrak wajah
-                face_roi = gray[y:y + h, x:x + w]
+                        # Ekstrak wajah
+                        face_roi = gray[y:y + h, x:x + w]
 
-                # Resize ke ukuran yang konsisten
-                face_roi = cv2.resize(face_roi, (100, 100))
+                        # Resize wajah
+                        face_roi = cv2.resize(face_roi, (100, 100))
 
-                # Gunakan nama file (tanpa ekstensi) sebagai nama orang
-                name = os.path.splitext(image_file)[0]
+                        # Tentukan label untuk kelas berdasarkan folder
+                        if class_folder not in label_map:
+                            label_map[class_folder] = label_count
+                            label_count += 1
 
-                # Tentukan label numerik untuk nama
-                if name not in label_map:
-                    label_map[name] = label_count
-                    label_count += 1
+                        faces.append(face_roi)
+                        labels.append(label_map[class_folder])
+                        print(f"Loaded {class_folder}")
+                    else:
+                        print(f"Warning: No face found in {image_file}")
 
-                faces.append(face_roi)
-                labels.append(label_map[name])
-                print(f"Loaded {name}")
-            else:
-                print(f"Warning: No face found in {image_file}")
-
-    # Training recognizer jika ada data
+    # Melatih model dengan data wajah
     if len(faces) > 0 and len(faces) == len(labels):
         print(f"Training with {len(faces)} faces...")
         try:
             recognizer.train(faces, np.array(labels))
             print("Training complete!")
 
-            # Buat lookup table label->name untuk digunakan saat prediksi
+            # Lookup table untuk label ke nama kelas
             label_to_name = {v: k for k, v in label_map.items()}
             return label_to_name
         except Exception as e:
@@ -429,18 +427,22 @@ def record_attendance_to_db(conn, name, confidence, mood):
         # Dapatkan kelas dari mapping
         kelas = get_class_for_student(name)
 
+        # Ekstrak kategori mood dan analisis dari dict mood
+        mood_category = mood.get('category', 'Normal')  # Default 'Normal' jika tidak ada kategori
+        mood_analysis = mood.get('analysis', '')  # Default kosong jika tidak ada analisis
+
         # Tambahkan data ke database
         cursor = conn.cursor()
         insert_query = sql.SQL("""
-            INSERT INTO {} (nama, kelas, tanggal, waktu, status, confidence, mood)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO {} (nama, kelas, tanggal, waktu, status, confidence, mood, mood_analysis)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """).format(sql.Identifier(DB_TABLE))
 
-        cursor.execute(insert_query, (name, kelas, date_string, time_string, 'Hadir', confidence, mood))
+        cursor.execute(insert_query, (name, kelas, date_string, time_string, 'Hadir', confidence, mood_category, mood_analysis))
         conn.commit()
         cursor.close()
 
-        print(f"Recorded attendance to database for {name} ({kelas}) at {time_string} - Mood: {mood}")
+        print(f"Recorded attendance to database for {name} ({kelas}) at {time_string} - Mood: {mood_category}")
         return True
     except Exception as e:
         print(f"Error recording to database: {e}")
@@ -549,7 +551,7 @@ def main():
 
     # Mulai video capture
     print("Opening webcam...")
-    video_capture = cv2.VideoCapture(1)
+    video_capture = cv2.VideoCapture(2)
 
     if not video_capture.isOpened():
         print("Error: Could not open webcam!")
