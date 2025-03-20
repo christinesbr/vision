@@ -10,8 +10,6 @@ import requests
 import base64
 from io import BytesIO
 from PIL import Image
-import face_recognition  # Perlu diinstall: pip install face_recognition
-import pickle
 
 # Tambahkan import psycopg2
 try:
@@ -26,8 +24,8 @@ except ImportError:
 
 # Konfigurasi
 MODEL_PATH = "Model"  # Path folder foto model
-FACE_ENCODINGS_FILE = "face_encodings.pkl"  # File untuk menyimpan encoding wajah
-CONFIDENCE_THRESHOLD = 0.6  # Threshold untuk matching (lebih rendah = lebih ketat)
+# OUTPUT_FILE = "6.csv"  # File CSV untuk output
+CONFIDENCE_THRESHOLD = 25  # Threshold untuk testing
 
 # Konfigurasi Ollama Llava untuk deteksi mood
 OLLAMA_ENABLED = True  # Set ke False jika tidak ingin menggunakan Llava
@@ -44,54 +42,30 @@ DB_CONFIG = {
 }
 DB_TABLE = "data_absensi"  # Nama tabel untuk menyimpan data absensi
 
+# Konfigurasi Kelas - gunakan kelas yang tetap tanpa nama orang
+KELAS_MAP = {
+    "CHRISTINE": "HRK",
+    "CHRISTINE S": "CHR",
+    "DENIS": "DEN",
+    "FADLY": "FDL",
+    "FAISAL": "FAI"
+    # Tambahkan mapping lain sesuai kebutuhan
+    # Jika tidak ada di mapping, akan menggunakan "Kelas Default"
+}
+DEFAULT_KELAS = "Kelas Default"
+
+# Inisialisasi face detector
+face_detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+# Inisialisasi recognizer
+recognizer = cv2.face.LBPHFaceRecognizer_create()
+
 # Variable untuk koneksi database
 db_conn = None
 use_database = False
 
 # Cache untuk mood untuk menghindari terlalu banyak panggilan ke Llava
 mood_cache = {}
-
-
-# Fungsi untuk membaca struktur folder dan menghasilkan KELAS_MAP
-def generate_class_mapping():
-    kelas_map = {}
-
-    # Periksa apakah folder model ada
-    if not os.path.exists(MODEL_PATH):
-        print(f"Warning: Model path {MODEL_PATH} does not exist")
-        return kelas_map
-
-    # Iterasi melalui semua folder di dalam MODEL_PATH
-    for item in os.listdir(MODEL_PATH):
-        item_path = os.path.join(MODEL_PATH, item)
-
-        # Jika item adalah folder, ini adalah kelas
-        if os.path.isdir(item_path):
-            kelas_code = item  # Kode kelas adalah nama folder
-
-            # Iterasi melalui file di dalam folder kelas
-            for file in os.listdir(item_path):
-                file_path = os.path.join(item_path, file)
-
-                # Jika itu adalah file gambar
-                if os.path.isfile(file_path) and file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    # Nama orang adalah nama file tanpa ekstensi
-                    person_name = os.path.splitext(file)[0]
-
-                    # Tambahkan ke mapping
-                    kelas_map[person_name] = kelas_code
-                    print(f"Mapped {person_name} to class {kelas_code}")
-
-        # Jika item adalah file gambar di root MODEL_PATH
-        elif os.path.isfile(item_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
-            # Nama orang adalah nama file tanpa ekstensi
-            person_name = os.path.splitext(item)[0]
-
-            # Gunakan nama file sebagai kelas juga (untuk gambar yang tidak di dalam subfolder)
-            kelas_map[person_name] = person_name
-            print(f"Mapped {person_name} (root file) with default class {person_name}")
-
-    return kelas_map
 
 
 # Fungsi untuk menghubungkan ke database
@@ -126,6 +100,64 @@ def connect_to_database():
         use_database = False
         return None
 
+
+# Fungsi untuk membuat tabel jika belum ada
+# def create_table(conn):
+#     if not conn:
+#         return False
+#
+#     try:
+#         cursor = conn.cursor()
+#
+#         # Cek apakah tabel sudah ada
+#         cursor.execute(f"SELECT to_regclass('public.{DB_TABLE}')")
+#         table_exists = cursor.fetchone()[0]
+#
+#         if not table_exists:
+#             # Buat tabel baru dengan kolom mood
+#             create_table_query = f"""
+#             CREATE TABLE {DB_TABLE} (
+#                 id SERIAL PRIMARY KEY,
+#                 nama TEXT NOT NULL,
+#                 kelas TEXT,
+#                 tanggal DATE NOT NULL,
+#                 waktu TIME NOT NULL,
+#                 status TEXT,
+#                 confidence NUMERIC(5, 2),
+#                 mood TEXT
+#             )
+#             """
+#             cursor.execute(create_table_query)
+#             conn.commit()
+#             print(f"Table {DB_TABLE} created successfully")
+#         else:
+#             # Cek apakah kolom mood sudah ada
+#             try:
+#                 check_column_query = f"""
+#                 SELECT column_name FROM information_schema.columns
+#                 WHERE table_name = '{DB_TABLE}' AND column_name = 'mood'
+#                 """
+#                 cursor.execute(check_column_query)
+#                 mood_column_exists = cursor.fetchone()
+#
+#                 # Jika kolom mood belum ada, tambahkan
+#                 if not mood_column_exists:
+#                     add_column_query = f"""
+#                     ALTER TABLE {DB_TABLE}
+#                     ADD COLUMN mood TEXT
+#                     """
+#                     cursor.execute(add_column_query)
+#                     conn.commit()
+#                     print(f"Added 'mood' column to {DB_TABLE}")
+#             except Exception as e:
+#                 print(f"Error checking/adding mood column: {e}")
+#
+#         cursor.close()
+#         return True
+#     except Exception as e:
+#         print(f"Error creating table: {e}")
+#         conn.rollback()
+#         return False
 
 def create_table(conn):
     if not conn:
@@ -186,7 +218,7 @@ def create_table(conn):
         return False
 
 
-# Fungsi untuk menampilkan model Ollama yang tersedia
+# Tambahkan fungsi ini ke kode Anda untuk menampilkan model yang tersedia
 def list_available_ollama_models():
     try:
         response = requests.get("http://localhost:11434/api/tags", timeout=5)
@@ -205,7 +237,7 @@ def list_available_ollama_models():
         return []
 
 
-# Fungsi untuk memeriksa koneksi Ollama
+# Fungsi yang ditingkatkan untuk memeriksa koneksi Ollama
 def check_ollama_connection():
     global OLLAMA_ENABLED, OLLAMA_MODEL
 
@@ -245,6 +277,55 @@ def check_ollama_connection():
 
     return OLLAMA_ENABLED
 
+# def analyze_mood(face_image):
+#     global mood_cache, OLLAMA_MODEL
+#
+#     # Jika Ollama dimatikan, return mood default
+#     if not OLLAMA_ENABLED:
+#         return "Normal"
+#
+#     try:
+#         # Konversi image ke base64
+#         _, buffer = cv2.imencode('.jpg', face_image)
+#         img_base64 = base64.b64encode(buffer).decode('utf-8')
+#
+#         # Buat payload dengan prompt yang lebih sederhana untuk testing
+#         payload = {
+#             "model": "llava:latest",  # Gunakan nama model lengkap dengan tag
+#             "prompt": "Describe this person's mood in one word: Happy, Sad, Neutral, or Stressed?",
+#             "stream": False,
+#             "images": [img_base64]
+#         }
+#
+#         # Debug: Log payload size
+#         print(f"Image payload size: {len(img_base64)} bytes")
+#
+#         # Kirim request ke Ollama dengan timeout lebih lama
+#         print(f"Sending request to Ollama using model {payload['model']}...")
+#         response = requests.post(OLLAMA_URL, json=payload, timeout=30)
+#
+#         # Debug: Log full response
+#         print(f"Response status: {response.status_code}")
+#         print(f"Response text: {response.text[:200]}...")  # Print first 200 chars
+#
+#         if response.status_code == 200:
+#             result = response.json()
+#             mood_text = result.get('response', '').strip()
+#
+#             # Normalisasi mood
+#             mood_text = mood_text.lower()
+#             if 'happy' in mood_text or 'good' in mood_text:
+#                 return "Good"
+#             elif 'sad' in mood_text or 'stress' in mood_text or 'angry' in mood_text:
+#                 return "Stress"
+#             else:
+#                 return "Normal"
+#         else:
+#             return f"Error: {response.status_code}"
+#     except Exception as e:
+#         print(f"Exception in mood analysis: {str(e)}")
+#         traceback.print_exc()
+#         return f"Error: {str(e)[:50]}"
 
 def analyze_mood(face_image):
     global mood_cache, OLLAMA_MODEL
@@ -270,7 +351,7 @@ def analyze_mood(face_image):
 
         # Buat payload untuk API Ollama
         payload = {
-            "model": OLLAMA_MODEL,
+            "model": "llava:latest",  # Pastikan menggunakan nama yang tepat
             "prompt": detailed_prompt,
             "stream": False,
             "images": [img_base64]
@@ -315,260 +396,7 @@ def analyze_mood(face_image):
         return {"category": "Error", "analysis": str(e)[:100]}
 
 
-# Fungsi untuk mendapatkan kelas berdasarkan nama/ID dari mapping dinamis
-def get_class_for_student(student_id, kelas_map, default_kelas="Kelas Default"):
-    # Student ID disini adalah nama file tanpa ekstensi
-    # Gunakan mapping kelas jika ada, atau default jika tidak ada
-    return kelas_map.get(student_id, default_kelas)
-
-
-# Fungsi untuk memproses dan enkode semua gambar wajah
-def train_face_recognizer():
-    print("Loading face data and creating face encodings...")
-
-    # Kamus untuk menyimpan encoding wajah dan informasi terkait
-    known_face_encodings = []
-    known_face_names = []
-    person_to_folder = {}
-
-    # Periksa jika folder Model ada
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model folder '{MODEL_PATH}' not found")
-        return [], [], {}
-
-    # Coba load face encodings dari file jika ada
-    if os.path.exists(FACE_ENCODINGS_FILE):
-        try:
-            with open(FACE_ENCODINGS_FILE, 'rb') as f:
-                data = pickle.load(f)
-                known_face_encodings = data['encodings']
-                known_face_names = data['names']
-                person_to_folder = data.get('folders', {})
-                print(f"Loaded {len(known_face_names)} face encodings from file.")
-                return known_face_encodings, known_face_names, person_to_folder
-        except Exception as e:
-            print(f"Error loading face encodings from file: {e}")
-            # Continue with training
-
-    # Proses semua subfolder (kelas)
-    for item in os.listdir(MODEL_PATH):
-        item_path = os.path.join(MODEL_PATH, item)
-
-        # Jika item adalah folder
-        if os.path.isdir(item_path):
-            kelas_code = item  # Kode kelas adalah nama folder
-            print(f"Processing class folder: {kelas_code}")
-
-            # Proses semua file gambar dalam folder kelas
-            for image_file in os.listdir(item_path):
-                if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    image_path = os.path.join(item_path, image_file)
-                    person_name = os.path.splitext(image_file)[0]
-
-                    # Proses file gambar
-                    process_image_for_encoding(
-                        image_path,
-                        person_name,
-                        kelas_code,
-                        known_face_encodings,
-                        known_face_names,
-                        person_to_folder
-                    )
-
-        # Jika item adalah file gambar di root folder Model
-        elif os.path.isfile(item_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
-            person_name = os.path.splitext(item)[0]
-
-            # Proses file gambar
-            process_image_for_encoding(
-                item_path,
-                person_name,
-                None,  # Tidak ada kelas karena file di root
-                known_face_encodings,
-                known_face_names,
-                person_to_folder
-            )
-
-    # Simpan face encodings ke file untuk digunakan kembali
-    if known_face_encodings and known_face_names:
-        try:
-            with open(FACE_ENCODINGS_FILE, 'wb') as f:
-                pickle.dump({
-                    'encodings': known_face_encodings,
-                    'names': known_face_names,
-                    'folders': person_to_folder
-                }, f)
-            print(f"Saved {len(known_face_names)} face encodings to file.")
-        except Exception as e:
-            print(f"Error saving face encodings to file: {e}")
-
-    return known_face_encodings, known_face_names, person_to_folder
-
-
-# Fungsi helper untuk memproses gambar dan mendapatkan encoding
-# def process_image_for_encoding(image_path, person_name, class_name, known_face_encodings, known_face_names,
-#                                person_to_folder):
-#     try:
-#         print(f"Processing {image_path}")
-#
-#         # Load gambar dengan face_recognition
-#         image = face_recognition.load_image_file(image_path)
-#
-#         # Deteksi wajah dalam gambar (menggunakan CNN model untuk akurasi lebih tinggi)
-#         face_locations = face_recognition.face_locations(image, model="cnn")
-#
-#         if face_locations:
-#             # Ambil encoding wajah (menggunakan wajah pertama yang ditemukan)
-#             face_encoding = face_recognition.face_encodings(image, face_locations, num_jitters=5)[0]
-#
-#             # Simpan encoding dan nama
-#             known_face_encodings.append(face_encoding)
-#             known_face_names.append(person_name)
-#
-#             # Simpan informasi folder/kelas
-#             person_to_folder[person_name] = class_name if class_name else person_name
-#
-#             print(f"Successfully encoded face for {person_name}")
-#         else:
-#             print(f"Warning: No face found in {image_path}")
-#     except Exception as e:
-#         print(f"Error processing {image_path}: {e}")
-
-def process_image_for_encoding(image_path, person_name, class_name, known_face_encodings, known_face_names,
-                               person_to_folder):
-    try:
-        print(f"Processing {image_path}")
-
-        # Load gambar dengan face_recognition
-        try:
-            image = face_recognition.load_image_file(image_path)
-        except Exception as e:
-            print(f"Error loading image {image_path}: {e}")
-            return
-
-        try:
-            # Resize gambar jika terlalu besar untuk menghindari masalah memori
-            h, w = image.shape[:2]
-            if max(h, w) > 1500:  # Jika dimensi > 1500 pixel
-                scale = 1500 / max(h, w)
-                image = cv2.resize(image, (int(w * scale), int(h * scale)))
-
-            # Deteksi wajah dalam gambar (gunakan model HOG yang lebih ringan jika CNN bermasalah)
-            face_locations = face_recognition.face_locations(image, model="hog")  # Coba 'hog' jika 'cnn' crash
-
-            if face_locations:
-                # Ambil encoding wajah (kurangi num_jitters jika memori bermasalah)
-                face_encoding = face_recognition.face_encodings(image, face_locations, num_jitters=1)[0]
-
-                # Simpan encoding dan nama
-                known_face_encodings.append(face_encoding)
-                known_face_names.append(person_name)
-
-                # Simpan informasi folder/kelas
-                person_to_folder[person_name] = class_name if class_name else person_name
-
-                print(f"Successfully encoded face for {person_name}")
-            else:
-                print(f"Warning: No face found in {image_path}")
-        except Exception as e:
-            print(f"Error during face detection/encoding in {image_path}: {e}")
-    except Exception as e:
-        print(f"Error processing {image_path}: {e}")
-
-
-# Fungsi untuk mencatat absensi ke database
-def record_attendance_to_db(conn, name, confidence, mood_data, kelas):
-    if not conn or not use_database:
-        return False
-
-    try:
-        # Buat timestamp untuk absensi
-        now = datetime.datetime.now()
-        date_string = now.strftime('%Y-%m-%d')
-        time_string = now.strftime('%H:%M:%S')
-
-        # Tambahkan data ke database
-        cursor = conn.cursor()
-        insert_query = sql.SQL("""
-            INSERT INTO {} (nama, kelas, tanggal, waktu, status, confidence, mood, mood_analysis)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """).format(sql.Identifier(DB_TABLE))
-
-        cursor.execute(insert_query, (
-            name,
-            kelas,
-            date_string,
-            time_string,
-            'Hadir',
-            confidence * 100,  # Konversi ke persentase
-            mood_data["category"],
-            mood_data["analysis"]
-        ))
-        conn.commit()
-        cursor.close()
-
-        print(f"Recorded attendance to database for {name} ({kelas}) at {time_string} - Mood: {mood_data['category']}")
-        return True
-    except Exception as e:
-        print(f"Error recording to database: {e}")
-        if conn:
-            try:
-                conn.rollback()
-            except:
-                pass
-        return False
-
-
-# Fungsi untuk mencatat absensi ke CSV
-def record_attendance_to_csv(name, confidence, mood_data, kelas):
-    try:
-        # Buat timestamp untuk absensi
-        now = datetime.datetime.now()
-        date_string = now.strftime('%Y-%m-%d')
-        time_string = now.strftime('%H:%M:%S')
-
-        # Output CSV filename disesuaikan dengan tanggal
-        output_file = f"attendance_{now.strftime('%Y%m%d')}.csv"
-
-        # Cek apakah file sudah ada
-        file_exists = os.path.isfile(output_file)
-
-        # Buat atau append ke file CSV
-        with open(output_file, 'a', newline='') as csvfile:
-            fieldnames = ['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood', 'Mood_Analysis']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-            # Tulis header jika file baru
-            if not file_exists:
-                writer.writeheader()
-
-            # Tulis data
-            writer.writerow({
-                'Nama': name,
-                'Kelas': kelas,
-                'Tanggal': date_string,
-                'Waktu': time_string,
-                'Status': 'Hadir',
-                'Confidence': f"{confidence * 100:.2f}",  # Konversi ke persentase
-                'Mood': mood_data["category"],
-                'Mood_Analysis': mood_data["analysis"]
-            })
-
-        print(f"Recorded attendance to CSV for {name} ({kelas}) at {time_string} - Mood: {mood_data['category']}")
-        return True
-    except Exception as e:
-        print(f"Error recording to CSV: {e}")
-        return False
-
-
-# Fungsi untuk mencatat absensi (ke database dan CSV)
-def record_attendance(name, confidence, face_img=None, kelas_map=None):
-    if kelas_map is None:
-        kelas_map = {}
-
-    # Dapatkan kelas dari mapping
-    kelas = get_class_for_student(name, kelas_map)
-
+def record_attendance(name, confidence, face_img=None):
     # Analisis mood jika gambar wajah tersedia
     mood_data = {"category": "Normal", "analysis": ""}  # Default mood
 
@@ -586,13 +414,388 @@ def record_attendance(name, confidence, face_img=None, kelas_map=None):
     # Catat ke database jika tersedia
     db_success = False
     if db_conn and use_database:
-        db_success = record_attendance_to_db(db_conn, name, confidence, mood_data, kelas)
+        db_success = record_attendance_to_db(db_conn, name, confidence, mood_data)
 
     # Catat ke CSV (sebagai backup atau jika database tidak tersedia)
-    csv_success = record_attendance_to_csv(name, confidence, mood_data, kelas)
+    csv_success = record_attendance_to_csv(name, confidence, mood_data)
 
     # Return True jika salah satu berhasil
     return (db_success or csv_success), mood_data
+
+
+# Fungsi untuk preprocessing gambar
+def preprocess_face(image):
+    # Konversi ke grayscale jika belum
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    # Normalisasi histogram untuk menangani perbedaan pencahayaan
+    gray = cv2.equalizeHist(gray)
+
+    return gray
+
+
+# Fungsi untuk mendapatkan kelas berdasarkan nama/ID
+# def get_class_for_student(student_id):
+#     # Student ID disini adalah nama file tanpa ekstensi
+#     # Gunakan mapping kelas jika ada, atau default jika tidak ada
+#     return KELAS_MAP.get(student_id, DEFAULT_KELAS)
+
+def get_class_for_student(student_id):
+    # Student ID disini adalah nama direktori atau nama file tanpa ekstensi
+    # Gunakan mapping kelas jika ada, atau default jika tidak ada
+    # Kita pertama coba cari di mapping
+    if student_id in KELAS_MAP:
+        return KELAS_MAP[student_id]
+
+    # Jika tidak ditemukan di mapping, coba periksa apakah nama sudah berisi kode kelas
+    # Misalnya jika nama foldernya adalah 'FDL', itu sudah merupakan kode kelas
+    for kelas_code in KELAS_MAP.values():
+        if student_id == kelas_code:
+            return student_id
+
+    # Jika masih tidak ditemukan, gunakan default
+    return DEFAULT_KELAS
+
+# Fungsi untuk training model dari gambar di folder Model
+# def train_face_recognizer():
+#     print("Loading face data...")
+#     faces = []
+#     labels = []
+#     label_map = {}
+#     label_count = 0
+#
+#     # Periksa semua file dalam folder Model
+#     for image_file in os.listdir(MODEL_PATH):
+#         if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+#             print(f"Processing {image_file}")
+#             image_path = os.path.join(MODEL_PATH, image_file)
+#
+#             # Load gambar
+#             img = cv2.imread(image_path)
+#             if img is None:
+#                 print(f"Error loading {image_path}. File mungkin rusak.")
+#                 continue
+#
+#             # Preprocessing
+#             gray = preprocess_face(img)
+#
+#             # Deteksi wajah
+#             detected_faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+#
+#             if len(detected_faces) > 0:
+#                 # Ambil wajah terbesar
+#                 (x, y, w, h) = sorted(detected_faces, key=lambda x: x[2] * x[3], reverse=True)[0]
+#
+#                 # Ekstrak wajah
+#                 face_roi = gray[y:y + h, x:x + w]
+#
+#                 # Resize ke ukuran yang konsisten
+#                 face_roi = cv2.resize(face_roi, (100, 100))
+#
+#                 # Gunakan nama file (tanpa ekstensi) sebagai nama orang
+#                 name = os.path.splitext(image_file)[0]
+#
+#                 # Tentukan label numerik untuk nama
+#                 if name not in label_map:
+#                     label_map[name] = label_count
+#                     label_count += 1
+#
+#                 faces.append(face_roi)
+#                 labels.append(label_map[name])
+#                 print(f"Loaded {name}")
+#             else:
+#                 print(f"Warning: No face found in {image_file}")
+#
+#     # Training recognizer jika ada data
+#     if len(faces) > 0 and len(faces) == len(labels):
+#         print(f"Training with {len(faces)} faces...")
+#         try:
+#             recognizer.train(faces, np.array(labels))
+#             print("Training complete!")
+#
+#             # Buat lookup table label->name untuk digunakan saat prediksi
+#             label_to_name = {v: k for k, v in label_map.items()}
+#             return label_to_name
+#         except Exception as e:
+#             print(f"Error during training: {e}")
+#             return {}
+#     else:
+#         print("Error: No faces found for training.")
+#         return {}
+
+# Fungsi untuk training model dari gambar di folder Model dengan struktur bersarang
+def train_face_recognizer():
+    print("Loading face data...")
+    faces = []
+    labels = []
+    label_map = {}
+    label_count = 0
+
+    # Fungsi rekursif untuk memproses direktori dan file
+    def process_directory(dir_path, parent_name=None):
+        nonlocal faces, labels, label_map, label_count
+
+        # Periksa semua item dalam direktori
+        for item in os.listdir(dir_path):
+            full_path = os.path.join(dir_path, item)
+
+            # Jika item adalah direktori, gunakan nama direktori sebagai identitas atau lanjutkan ke subdirektori
+            if os.path.isdir(full_path):
+                # Jika ini adalah direktori langsung di bawah Model, gunakan nama direktori sebagai identitas
+                if parent_name is None:
+                    process_directory(full_path, item)
+                else:
+                    # Ini adalah subdirektori dalam, tetap gunakan parent_name sebagai identitas
+                    process_directory(full_path, parent_name)
+
+            # Jika item adalah file gambar
+            elif os.path.isfile(full_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
+                print(f"Processing {full_path}")
+
+                # Tentukan nama/identitas:
+                # 1. Jika ada parent_name, gunakan itu (berarti file ada dalam folder)
+                # 2. Jika tidak, gunakan nama file tanpa ekstensi
+                if parent_name:
+                    name = parent_name
+                else:
+                    name = os.path.splitext(item)[0]
+
+                # Load gambar
+                img = cv2.imread(full_path)
+                if img is None:
+                    print(f"Error loading {full_path}. File mungkin rusak.")
+                    continue
+
+                # Preprocessing
+                gray = preprocess_face(img)
+
+                # Deteksi wajah
+                detected_faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+                if len(detected_faces) > 0:
+                    # Ambil wajah terbesar
+                    (x, y, w, h) = sorted(detected_faces, key=lambda x: x[2] * x[3], reverse=True)[0]
+
+                    # Ekstrak wajah
+                    face_roi = gray[y:y + h, x:x + w]
+
+                    # Resize ke ukuran yang konsisten
+                    face_roi = cv2.resize(face_roi, (100, 100))
+
+                    # Tentukan label numerik untuk nama
+                    if name not in label_map:
+                        label_map[name] = label_count
+                        label_count += 1
+
+                    faces.append(face_roi)
+                    labels.append(label_map[name])
+                    print(f"Loaded {name} from {full_path}")
+                else:
+                    print(f"Warning: No face found in {full_path}")
+
+    # Mulai pemrosesan dari direktori Model
+    process_directory(MODEL_PATH)
+
+    # Training recognizer jika ada data
+    if len(faces) > 0 and len(faces) == len(labels):
+        print(f"Training with {len(faces)} faces...")
+        try:
+            recognizer.train(faces, np.array(labels))
+            print("Training complete!")
+
+            # Buat lookup table label->name untuk digunakan saat prediksi
+            label_to_name = {v: k for k, v in label_map.items()}
+
+            # Print summary
+            print("\nTraining summary:")
+            print(f"Total identities: {len(label_to_name)}")
+            for label, name in label_to_name.items():
+                count = labels.count(label)
+                print(f"  - {name}: {count} images")
+
+            return label_to_name
+        except Exception as e:
+            print(f"Error during training: {e}")
+            traceback.print_exc()
+            return {}
+    else:
+        print("Error: No faces found for training or faces/labels mismatch.")
+        print(f"Faces: {len(faces)}, Labels: {len(labels)}")
+        return {}
+
+
+# # Siapkan file CSV
+# def setup_csv():
+#     try:
+#         # Cek apakah file sudah ada
+#         file_exists = os.path.isfile(OUTPUT_FILE)
+#
+#         # Buat file CSV jika belum ada
+#         if not file_exists:
+#             with open(OUTPUT_FILE, 'w', newline='') as csvfile:
+#                 fieldnames = ['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood']
+#                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+#                 writer.writeheader()
+#         # Jika file sudah ada, cek header untuk kompatibilitas
+#         else:
+#             with open(OUTPUT_FILE, 'r', newline='') as csvfile:
+#                 reader = csv.reader(csvfile)
+#                 header = next(reader, None)
+#
+#                 # Jika header lama tidak memiliki kolom Mood, buat file baru
+#                 if header and 'Mood' not in header:
+#                     print("Updating CSV format to include Mood column...")
+#                     # Backup file lama
+#                     backup_file = f"{OUTPUT_FILE}.bak"
+#                     os.rename(OUTPUT_FILE, backup_file)
+#
+#                     # Buat file baru dengan header yang benar
+#                     with open(OUTPUT_FILE, 'w', newline='') as new_csvfile:
+#                         fieldnames = ['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood']
+#                         writer = csv.DictWriter(new_csvfile, fieldnames=fieldnames)
+#                         writer.writeheader()
+#
+#                         # Copy data lama ke file baru
+#                         with open(backup_file, 'r', newline='') as old_csvfile:
+#                             reader = csv.DictReader(old_csvfile)
+#                             for row in reader:
+#                                 # Tambahkan kolom Mood jika tidak ada
+#                                 if 'Mood' not in row:
+#                                     row['Mood'] = 'Normal'
+#                                 writer.writerow(row)
+#
+#                     print(f"CSV file updated. Backup saved as {backup_file}")
+#
+#         return True
+#     except Exception as e:
+#         print(f"Error setting up CSV: {e}")
+#         return False
+
+
+# Fungsi untuk mencatat absensi ke database
+def record_attendance_to_db(conn, name, confidence, mood):
+    if not conn or not use_database:
+        return False
+
+    try:
+        # Buat timestamp untuk absensi
+        now = datetime.datetime.now()
+        date_string = now.strftime('%Y-%m-%d')
+        time_string = now.strftime('%H:%M:%S')
+
+        # Dapatkan kelas dari mapping
+        kelas = get_class_for_student(name)
+
+        # Tambahkan data ke database
+        cursor = conn.cursor()
+        insert_query = sql.SQL("""
+            INSERT INTO {} (nama, kelas, tanggal, waktu, status, confidence, mood)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """).format(sql.Identifier(DB_TABLE))
+
+        cursor.execute(insert_query, (name, kelas, date_string, time_string, 'Hadir', confidence, mood))
+        conn.commit()
+        cursor.close()
+
+        print(f"Recorded attendance to database for {name} ({kelas}) at {time_string} - Mood: {mood}")
+        return True
+    except Exception as e:
+        print(f"Error recording to database: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        return False
+
+
+# Fungsi untuk mencatat absensi ke CSV
+def record_attendance_to_csv(name, confidence, mood):
+    try:
+        # Buat timestamp untuk absensi
+        now = datetime.datetime.now()
+        date_string = now.strftime('%Y-%m-%d')
+        time_string = now.strftime('%H:%M:%S')
+
+        # Dapatkan kelas dari mapping berdasarkan ID/nama
+        kelas = get_class_for_student(name)
+
+        # Tambahkan data ke CSV
+        # with open(OUTPUT_FILE, 'a', newline='') as csvfile:
+        #     writer = csv.DictWriter(csvfile,
+        #                             fieldnames=['Nama', 'Kelas', 'Tanggal', 'Waktu', 'Status', 'Confidence', 'Mood'])
+        #     writer.writerow({
+        #         'Nama': name,
+        #         'Kelas': kelas,
+        #         'Tanggal': date_string,
+        #         'Waktu': time_string,
+        #         'Status': 'Hadir',
+        #         'Confidence': f"{confidence:.2f}",
+        #         'Mood': mood
+        #     })
+
+        print(f"Recorded attendance to CSV for {name} ({kelas}) at {time_string} - Mood: {mood}")
+        return True
+    except Exception as e:
+        print(f"Error recording to CSV: {e}")
+        return False
+
+
+# Fungsi untuk mencatat absensi (ke database dan CSV)
+def record_attendance(name, confidence, face_img=None):
+    # Analisis mood jika gambar wajah tersedia
+    mood = "Normal"  # Default mood
+    if face_img is not None and OLLAMA_ENABLED:
+        # Cek cache dulu
+        cache_key = f"{name}_{int(time.time() / 60)}"  # Cache per menit per orang
+        if cache_key in mood_cache:
+            mood = mood_cache[cache_key]
+        else:
+            # Analisis mood dengan Ollama
+            mood = analyze_mood(face_img)
+            # Simpan ke cache
+            mood_cache[cache_key] = mood
+
+    # Catat ke database jika tersedia
+    db_success = False
+    if db_conn and use_database:
+        db_success = record_attendance_to_db(db_conn, name, confidence, mood)
+
+    # Catat ke CSV (sebagai backup atau jika database tidak tersedia)
+    csv_success = record_attendance_to_csv(name, confidence, mood)
+
+    # Return True jika salah satu berhasil
+    return (db_success or csv_success), mood
+
+
+# Fungsi untuk memeriksa koneksi Ollama
+def check_ollama_connection():
+    global OLLAMA_ENABLED
+
+    try:
+        # Cek koneksi ke Ollama dengan simple health check
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            # Periksa apakah model llava tersedia
+            if any(model['name'] == OLLAMA_MODEL for model in models):
+                print(f"Ollama connected. {OLLAMA_MODEL} model is available.")
+                OLLAMA_ENABLED = True
+            else:
+                print(f"Ollama connected, but {OLLAMA_MODEL} model is not available.")
+                print(f"Please install the model with: ollama pull {OLLAMA_MODEL}")
+                OLLAMA_ENABLED = False
+        else:
+            print("Could not connect to Ollama API.")
+            OLLAMA_ENABLED = False
+    except Exception as e:
+        print(f"Error connecting to Ollama: {e}")
+        OLLAMA_ENABLED = False
+
+    return OLLAMA_ENABLED
 
 
 # Main function
@@ -600,7 +803,7 @@ def main():
     global db_conn, use_database, OLLAMA_ENABLED
 
     print("=" * 50)
-    print("SISTEM ABSENSI WAJAH DENGAN DETEKSI MOOD (CNN-BASED)")
+    print("SISTEM ABSENSI WAJAH DENGAN DETEKSI MOOD")
     print("=" * 50)
 
     # Cek koneksi Ollama
@@ -610,25 +813,20 @@ def main():
     # Mencoba koneksi ke database
     db_conn = connect_to_database()
 
-    # Generate mapping kelas dari struktur folder
-    kelas_map = generate_class_mapping()
-    print(f"Generated class mapping from folder structure: {kelas_map}")
-
-    # Training model (load/generate face encodings)
-    known_face_encodings, known_face_names, person_to_folder = train_face_recognizer()
-
-    if not known_face_encodings or not known_face_names:
+    # Training model
+    label_to_name = train_face_recognizer()
+    if not label_to_name:
         print("Error: No face data available. Exiting.")
         if db_conn:
             db_conn.close()
         return
 
-    print(f"Loaded {len(known_face_names)} faces for recognition")
-
-    # Jika kelas_map kosong, gunakan person_to_folder
-    if not kelas_map and person_to_folder:
-        kelas_map = person_to_folder
-        print(f"Using folder structure for class mapping: {kelas_map}")
+    # Setup CSV
+    # if not setup_csv():
+    #     print("Error: CSV setup failed. Exiting.")
+    #     if db_conn:
+    #         db_conn.close()
+    #     return
 
     # Mulai video capture
     print("Opening webcam...")
@@ -654,216 +852,202 @@ def main():
     frame_count = 0
     start_time = time.time()
     force_record = False
-    process_this_frame = True
 
-    try:
-        while True:
-            # Ambil frame dari video
-            ret, frame = video_capture.read()
-            if not ret:
-                print("Failed to grab frame")
-                break
+    while True:
+        # Ambil frame dari video
+        ret, frame = video_capture.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
 
-            frame_count += 1
+        frame_count += 1
 
-            # Hanya proses setiap frame ke-2 untuk performa lebih baik (kecuali jika force_record)
-            if process_this_frame or force_record:
-                # Resize frame untuk pemrosesan lebih cepat
-                small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        # Buat salinan untuk tampilan
+        display_frame = frame.copy()
 
-                # Konversi dari BGR (OpenCV) ke RGB (face_recognition)
-                rgb_small_frame = small_frame[:, :, ::-1]
+        # Process setiap 3 frame untuk efisiensi atau ketika dipaksa
+        if frame_count % 3 == 0 or force_record:
+            # Deteksi wajah menggunakan Haar Cascade
+            gray = preprocess_face(frame)
+            faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-                # Deteksi wajah dan encoding
-                face_locations = face_recognition.face_locations(rgb_small_frame)
-                face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+            # Loop semua wajah yang terdeteksi
+            for (x, y, w, h) in faces:
+                try:
+                    # Ekstrak dan preprocessing wajah
+                    face_roi = gray[y:y + h, x:x + w]
+                    face_color = frame[y:y + h, x:x + w]  # For mood analysis
 
-                # Reset daftar nama wajah yang terdeteksi pada frame ini
-                face_names = []
-                face_confidences = []
+                    # Resize ke ukuran yang sama dengan training
+                    face_roi = cv2.resize(face_roi, (100, 100))
 
-                for face_encoding in face_encodings:
-                    # Bandingkan dengan semua wajah yang diketahui
-                    matches = face_recognition.compare_faces(known_face_encodings, face_encoding,
-                                                             tolerance=CONFIDENCE_THRESHOLD)
-                    name = "Unknown"
-                    confidence = 0.0
+                    # Prediksi wajah
+                    label, confidence = recognizer.predict(face_roi)
 
-                    # Gunakan face_distance untuk mendapatkan yang paling mendekati wajah saat ini
-                    face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                    # Konversi confidence 0-100
+                    confidence_score = 100 - min(100, confidence)
 
-                    if len(face_distances) > 0:
-                        best_match_index = np.argmin(face_distances)
-                        if matches[best_match_index]:
-                            name = known_face_names[best_match_index]
-                            # Konversi face_distance ke confidence score (1.0 - distance)
-                            # face_distance mendekati 0 berarti cocok, mendekati 1 berarti tidak cocok
-                            confidence = 1.0 - face_distances[best_match_index]
+                    # Dapatkan nama dan status
+                    name = label_to_name.get(label, "Unknown")
+                    verified = name in attendance_recorded
 
-                    face_names.append(name)
-                    face_confidences.append(confidence)
+                    # Dapatkan kelas
+                    kelas = get_class_for_student(name)
 
-            # Alihkan flag process_this_frame
-            process_this_frame = not process_this_frame
+                    # Tentukan warna box berdasarkan confidence
+                    if confidence_score >= CONFIDENCE_THRESHOLD or force_record:
+                        box_color = (0, 255, 0)  # Hijau jika confidence tinggi
 
-            # Buat salinan untuk tampilan
-            display_frame = frame.copy()
-
-            # Tampilkan hasil
-            for (top, right, bottom, left), name, confidence in zip(face_locations, face_names, face_confidences):
-                # Scale koordinat dari small_frame ke ukuran asli
-                top *= 4
-                right *= 4
-                bottom *= 4
-                left *= 4
-
-                # Tentukan apakah wajah dikenali dengan baik
-                verified = name in attendance_recorded
-
-                # Ekstrak gambar wajah untuk analisis mood
-                face_img = frame[top:bottom, left:right]
-
-                # Dapatkan kelas
-                kelas = get_class_for_student(name, kelas_map)
-
-                # Tentukan warna box berdasarkan confidence
-                if confidence >= CONFIDENCE_THRESHOLD or force_record:
-                    box_color = (0, 255, 0)  # Hijau jika confidence tinggi
-
-                    # Jika belum terekam atau force record, catat absensi
-                    if (not verified or force_record) and name != "Unknown":
-                        success, detected_mood = record_attendance(name, confidence, face_img, kelas_map)
-                        if success:
-                            attendance_recorded.add(name)
-                            mood_record[name] = detected_mood
-                    elif name in mood_record:
-                        detected_mood = mood_record[name]
+                        # Jika belum terekam atau force record, catat absensi
+                        if (not verified or force_record) and name != "Unknown":
+                            success, detected_mood = record_attendance(name, confidence_score, face_color)
+                            if success:
+                                attendance_recorded.add(name)
+                                mood_record[name] = detected_mood
+                        elif name in mood_record:
+                            detected_mood = mood_record[name]
+                        else:
+                            detected_mood = "Normal"
                     else:
-                        detected_mood = {"category": "Normal", "analysis": ""}
-                else:
-                    box_color = (0, 165, 255)  # Orange jika confidence rendah
-                    detected_mood = {"category": "Unknown", "analysis": ""}
+                        box_color = (0, 165, 255)  # Orange jika confidence rendah
+                        detected_mood = "Unknown"
 
-                # Gambar box di sekitar wajah
-                cv2.rectangle(display_frame, (left, top), (right, bottom), box_color, 2)
+                    # Gambar box di sekitar wajah
+                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), box_color, 2)
 
-                # Label dengan nama, kelas, dan status
-                status = "✓ Terverifikasi" if verified else f"Mendeteksi... ({confidence * 100:.1f}%)"
-                label_text = f"{name} | {kelas} | {status}"
-                cv2.putText(display_frame, label_text, (left, top - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+                    # Label dengan nama, kelas, dan status
+                    status = "✓ Terverifikasi" if verified else f"Mendeteksi... ({confidence_score:.1f}%)"
+                    label_text = f"{name} | {kelas} | {status}"
+                    cv2.putText(display_frame, label_text, (x, y - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
-                # Tampilkan mood di bawah nama
-                if name != "Unknown" and detected_mood["category"] != "Unknown":
-                    mood_color = (0, 255, 0) if detected_mood["category"] == "Good" else (
-                        0, 0, 255) if detected_mood["category"] == "Stress" else (255, 165, 0)
+                    # Tampilkan mood di bawah nama
+                    if name != "Unknown" and detected_mood["category"] != "Unknown":
+                        mood_color = (0, 255, 0) if detected_mood["category"] == "Good" else (
+                            0, 0, 255) if detected_mood["category"] == "Stress" else (255, 165, 0)
 
-                    # Tampilkan kategori mood
-                    cv2.putText(display_frame, f"Mood: {detected_mood['category']}", (left, bottom + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, mood_color, 2)
+                        # Tampilkan kategori mood
+                        cv2.putText(display_frame, f"Mood: {detected_mood['category']}", (x, y + h + 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, mood_color, 2)
 
-                    # Tampilkan analisis mood (maksimal 60 karakter)
-                    analysis_text = detected_mood.get("analysis", "")
-                    if analysis_text:
-                        # Batasi panjang teks dan bagi menjadi beberapa baris jika perlu
-                        max_length = 60
-                        if len(analysis_text) > max_length:
-                            analysis_text = analysis_text[:max_length] + "..."
+                        # Tampilkan analisis mood (maksimal 60 karakter)
+                        analysis_text = detected_mood.get("analysis", "")
+                        if analysis_text:
+                            # Batasi panjang teks dan bagi menjadi beberapa baris jika perlu
+                            max_length = 60
+                            if len(analysis_text) > max_length:
+                                analysis_text = analysis_text[:max_length] + "..."
 
-                        cv2.putText(display_frame, f"Analisis: {analysis_text}", (left, bottom + 40),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                            cv2.putText(display_frame, f"Analisis: {analysis_text}", (x, y + h + 40),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-            # Reset force record flag
-            force_record = False
+                except Exception as e:
+                    print(f"Error processing face: {e}")
+                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
-            # Hitung dan tampilkan FPS
-            elapsed_time = time.time() - start_time
-            fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+        # Reset force record flag
+        force_record = False
 
-            # Tampilkan informasi
-            cv2.putText(display_frame, f"Terdeteksi: {len(attendance_recorded)}/{len(known_face_names)}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # Hitung dan tampilkan FPS
+        elapsed_time = time.time() - start_time
+        fps = frame_count / elapsed_time if elapsed_time > 0 else 0
 
-            # Tampilkan nama-nama yang sudah terabsen
-            y_pos = 60
-            for name in attendance_recorded:
-                kelas = get_class_for_student(name, kelas_map)
-                mood = mood_record.get(name, {"category": "Normal"})
-                mood_text = f" - Mood: {mood['category']}" if mood['category'] != "Unknown" else ""
-                cv2.putText(display_frame, f"✓ {name} ({kelas}){mood_text}", (10, y_pos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                y_pos += 25
+        # Tampilkan informasi
+        cv2.putText(display_frame, f"Terdeteksi: {len(attendance_recorded)}/{len(label_to_name)}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            # Tampilkan status database
-            db_status = "Terhubung ke Database" if (db_conn and use_database) else "Tidak Terhubung ke DB!"
-            db_color = (0, 255, 255) if (db_conn and use_database) else (0, 0, 255)
-            cv2.putText(display_frame, db_status, (10, display_frame.shape[0] - 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, db_color, 2)
-
-            # Tampilkan status Ollama
-            ollama_status = "Ollama Aktif" if OLLAMA_ENABLED else "Ollama Tidak Aktif"
-            ollama_color = (0, 255, 255) if OLLAMA_ENABLED else (0, 0, 255)
-            cv2.putText(display_frame, ollama_status, (10, display_frame.shape[0] - 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, ollama_color, 2)
-
-            # Tampilkan instruksi di bagian bawah
-            cv2.putText(display_frame, "r: Record | s: Save | d: DB | o: Ollama | q: Quit",
-                        (10, display_frame.shape[0] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-            # Tampilkan hasil
-            cv2.imshow('Sistem Absensi Wajah dengan Deteksi Mood (CNN)', display_frame)
-
-            # Key handling
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('q'):
-                # Quit
-                break
-            elif key == ord('s'):
-                # Save current frame
-                filename = f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                cv2.imwrite(filename, frame)
-                print(f"Gambar disimpan: {filename}")
-            elif key == ord('r'):
-                # Force record attendance for all detected faces
-                force_record = True
-                print("Memaksa pencatatan kehadiran...")
-            elif key == ord('d'):
-                # Try to connect to database again
-                print("Mencoba menghubungkan ke database...")
-                if db_conn:
-                    try:
-                        db_conn.close()
-                    except:
-                        pass
-                db_conn = connect_to_database()
-            elif key == ord('o'):
-                # Try to connect to Ollama again
-                print("Mencoba menghubungkan ke Ollama...")
-                OLLAMA_ENABLED = check_ollama_connection()
-
-    except KeyboardInterrupt:
-        print("Program terminated by user")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        traceback.print_exc()
-    finally:
-        # Bersihkan
-        video_capture.release()
-        cv2.destroyAllWindows()
-        if db_conn:
-            db_conn.close()
-
-        print("\nPencatatan Kehadiran Selesai")
-        print(f"Data absensi tersimpan di CSV dan/atau database")
-        if use_database:
-            print(f"Data absensi tersimpan di database: {DB_CONFIG['database']}.{DB_TABLE}")
-        print(f"Total absensi: {len(attendance_recorded)} orang")
+        # Tampilkan nama-nama yang sudah terabsen
+        y_pos = 60
         for name in attendance_recorded:
-            kelas = get_class_for_student(name, kelas_map)
-            mood = mood_record.get(name, {"category": "Normal"})
-            print(f"- {name} ({kelas}) - Mood: {mood['category']}")
+            kelas = get_class_for_student(name)
+            mood = mood_record.get(name, "Normal")
+            mood_text = f" - Mood: {mood}" if mood != "Unknown" else ""
+            cv2.putText(display_frame, f"✓ {name} ({kelas}){mood_text}", (10, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            y_pos += 25
+
+        # Tampilkan status database
+        db_status = "Terhubung ke Database" if (db_conn and use_database) else "Tidak Terhubung ke DB!"
+        db_color = (0, 255, 255) if (db_conn and use_database) else (0, 0, 255)
+        cv2.putText(display_frame, db_status, (10, display_frame.shape[0] - 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, db_color, 2)
+
+        # Tampilkan status Ollama
+        ollama_status = "Ollama Aktif" if OLLAMA_ENABLED else "Ollama Tidak Aktif"
+        ollama_color = (0, 255, 255) if OLLAMA_ENABLED else (0, 0, 255)
+        cv2.putText(display_frame, ollama_status, (10, display_frame.shape[0] - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, ollama_color, 2)
+
+        # Tampilkan instruksi di bagian bawah
+        cv2.putText(display_frame, "r: Record | s: Save | d: DB | o: Ollama | q: Quit",
+                    (10, display_frame.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Tampilkan hasil
+        cv2.imshow('Sistem Absensi Wajah dengan Deteksi Mood', display_frame)
+
+        # Key handling
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('q'):
+            # Quit
+            break
+        elif key == ord('s'):
+            # Save current frame
+            filename = f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            cv2.imwrite(filename, frame)
+            print(f"Gambar disimpan: {filename}")
+        elif key == ord('r'):
+            # Force record attendance for all detected faces
+            force_record = True
+            print("Memaksa pencatatan kehadiran...")
+        elif key == ord('d'):
+            # Try to connect to database again
+            print("Mencoba menghubungkan ke database...")
+            if db_conn:
+                try:
+                    db_conn.close()
+                except:
+                    pass
+            db_conn = connect_to_database()
+        elif key == ord('o'):
+            # Try to connect to Ollama again
+            print("Mencoba menghubungkan ke Ollama...")
+            OLLAMA_ENABLED = check_ollama_connection()
+
+    # Bersihkan
+    video_capture.release()
+    cv2.destroyAllWindows()
+    if db_conn:
+        db_conn.close()
+
+    print("\nPencatatan Kehadiran Selesai")
+    # print(f"Data absensi tersimpan di: {os.path.abspath(OUTPUT_FILE)}")
+    if use_database:
+        print(f"Data absensi juga tersimpan di database: {DB_CONFIG['database']}.{DB_TABLE}")
+    print(f"Total absensi: {len(attendance_recorded)} orang")
+    for name in attendance_recorded:
+        kelas = get_class_for_student(name)
+        mood = mood_record.get(name, "Normal")
+        print(f"- {name} ({kelas}) - Mood: {mood}")
+
+
+def display_model_structure():
+    print("\nStruktur Direktori Model:")
+
+    def print_directory(dir_path, indent=0):
+        for item in sorted(os.listdir(dir_path)):
+            full_path = os.path.join(dir_path, item)
+            prefix = "  " * indent
+
+            if os.path.isdir(full_path):
+                print(f"{prefix}📁 {item}")
+                print_directory(full_path, indent + 1)
+            elif item.lower().endswith(('.png', '.jpg', '.jpeg')):
+                print(f"{prefix}🖼️  {item}")
+
+    print_directory(MODEL_PATH)
+    print("")
 
 
 if __name__ == "__main__":
